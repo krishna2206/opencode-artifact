@@ -360,6 +360,37 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
     return count === 0 ? "" : ` · ${count} comment${count > 1 ? "s" : ""}`;
   };
 
+  // Closing drops what the editor holds: unsaved edits need a confirmation.
+  const close = async () => {
+    if (mode() === "edit" && editor && editor.plainText !== editBase()) {
+      const ok = await ask(() =>
+        ctx.ui.dialog.confirm({
+          title: "Close the artifact?",
+          message: "Your unsaved edits will be lost.",
+          label: { confirm: "Close", cancel: "Keep editing" },
+        }),
+      );
+      if (!ok) return;
+    }
+    props.input.close();
+  };
+
+  // A plain bold X: the ✕ glyph is small in most terminal fonts.
+  const closeButton = () => (
+    <text
+      fg={theme().text.base}
+      attributes={TextAttributes.BOLD}
+      flexShrink={0}
+      selectable={false}
+      onMouseUp={(event: { stopPropagation: () => void }) => {
+        event.stopPropagation();
+        void close();
+      }}
+    >
+      X
+    </text>
+  );
+
   const changedWhileEditing = () => mode() === "edit" && artifact().content !== editBase();
 
   return (
@@ -381,12 +412,13 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
       <Show
         when={exists(artifact())}
         fallback={
-          <box flexGrow={1}>
-            <text fg={theme().text.muted}>
+          <box flexDirection="row" flexGrow={1} gap={1}>
+            <text fg={theme().text.muted} flexGrow={1} minWidth={0}>
               {loaded()
                 ? "No artifact in this session yet. Ask the agent to write one (a plan, a spec…)."
                 : "Loading the artifact…"}
             </text>
+            {closeButton()}
           </box>
         }
       >
@@ -397,6 +429,11 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
           <text fg={theme().text.muted} wrapMode="none" flexShrink={0}>
             {`rev ${artifact().revision}${commentCount()}${artifact().editedByUser ? " · edited" : ""}${mode() === "edit" ? " · editing" : ""}`}
           </text>
+          {/* The same separator as the footer's shortcuts. */}
+          <text fg={theme().text.muted} flexShrink={0} selectable={false}>
+            ·
+          </text>
+          {closeButton()}
         </box>
         <Show when={changedWhileEditing()}>
           <text fg={theme().text.feedback.warning.base} flexShrink={0}>

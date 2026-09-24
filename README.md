@@ -47,7 +47,8 @@ back to find the latest version.
   then): your comments, with the passages they are about, and whether you edited the text,
   as one short message the agent receives after its current turn. The footer counts what
   is ready to send.
-- `f` toggles fullscreen, `q` closes the panel. The panel's width can be dragged.
+- `f` toggles fullscreen, `q` or the `X` in the header closes the panel (asking first if the
+  editor has unsaved edits). The panel's width can be dragged.
 - If the agent changes the document while you edit it, saving asks before replacing its version.
 
 ## Install
