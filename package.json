@@ -1,0 +1,56 @@
+{
+  "name": "opencode-artifact",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "OpenCode 2 plugin: a Markdown artifact the agent writes and you review, edit and comment in a side panel.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./tui": {
+      "types": "./dist/tui.d.ts",
+      "default": "./dist/tui.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "packageManager": "pnpm@11.0.0",
+  "scripts": {
+    "build": "node scripts/clean-dist.mjs && tsc && node scripts/prepare-tui-dist.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test tests"
+  },
+  "dependencies": {
+    "effect": "4.0.0-rc.112",
+    "marked": "17.0.1"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.28.0",
+    "@babel/preset-typescript": "^7.27.1",
+    "@opencode/plugin": "2.0.15",
+    "@opentui/core": "0.5.10",
+    "@opentui/solid": "0.5.10",
+    "@types/node": "^26.1.2",
+    "babel-preset-solid": "^1.9.12",
+    "solid-js": "1.9.15",
+    "typescript": "7.0.2"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": "^2.0.0",
+    "@opentui/core": ">=0.5.10",
+    "@opentui/solid": ">=0.5.10",
+    "solid-js": "^1.9.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "license": "MIT"
+}
