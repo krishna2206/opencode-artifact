@@ -38,8 +38,15 @@ export function createStore(storage: Storage) {
       queues.set(sessionID, run);
       return run;
     },
-    async remove(sessionID: string): Promise<void> {
-      await storage.remove(key(sessionID));
+    /** Removes the session's artifact, after the writes already queued. Returns what was removed. */
+    remove(sessionID: string): Promise<Artifact> {
+      const run = (queues.get(sessionID) ?? Promise.resolve()).catch(() => {}).then(async () => {
+        const before = await read(sessionID);
+        await storage.remove(key(sessionID));
+        return before;
+      });
+      queues.set(sessionID, run);
+      return run;
     },
   };
 }

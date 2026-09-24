@@ -16,6 +16,10 @@ back to find the latest version.
 - `artifact_write`: writes the whole document (with an optional title).
 - `artifact_edit`: replaces one passage, which must be unique unless `replace_all` is set.
 - `artifact_read`: reads the document as it is now, your edits included.
+- `artifact_delete`: deletes the document and its unsent comments. Its description limits it
+  to an explicit request from you, and the agent must quote that request in the call
+  (`artifact_delete [request=…]` in the chat). Replacing the content goes through
+  `artifact_write` instead.
 - After a compaction, a one-line reminder tells the agent the session has an artifact.
 
 **In the TUI**
@@ -25,13 +29,14 @@ back to find the latest version.
   opens and closes it.
 - Read mode renders the Markdown. Select a passage with the mouse, press `c` and write a
   comment: the block takes the prompt's background, and the comment shows right under it,
-  full width, in the theme's text and background colours swapped (`✕` removes it). `c` only works on a selection: a remark on the whole document goes in
-  the chat. While a passage is selected, only `c` and `esc` (cancel) work: the other keys wait
-  until it is commented or cancelled. Once a comment is added, the keyboard goes back to the
-  prompt. A selection in the
-  panel is not copied to the clipboard (the chat keeps opencode's copy on select).
+  full width, in the theme's text and background colours swapped (`✕` removes it). `c` only
+  works on a selection: a remark on the whole document goes in the chat. While a passage is
+  selected, only `c` and `esc` (cancel) work: the other keys wait until it is commented or
+  cancelled. Once a comment is added, the keyboard goes back to the prompt. A selection in
+  the panel is not copied to the clipboard (the chat keeps opencode's copy on select).
 - `e` switches to the raw Markdown editor: `ctrl+s` saves, `ctrl+k` comments the selected
-  text (a selection is required), `ctrl+d` discards. Commented passages are highlighted in the editor.
+  text (a selection is required), `ctrl+d` discards. Commented passages are highlighted in
+  the editor.
 - `s` sends the review, once there is at least one comment (the key and its hint appear
   then): your comments, with the passages they are about, and whether you edited the text,
   as one short message the agent receives after its current turn. The footer counts what

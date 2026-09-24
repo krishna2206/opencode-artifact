@@ -144,6 +144,11 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput }) {
       if (ticket !== requested) return;
       setArtifact(next);
       setLoaded(true);
+      // Deleted by the agent: nothing left to edit or comment.
+      if (!exists(next)) {
+        setMode("view");
+        setSelected("");
+      }
     } catch {
       // Server plugin not ready or not loaded: keep what is shown.
     }

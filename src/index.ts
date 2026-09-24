@@ -23,7 +23,7 @@ import {
 import { ArtifactRpc } from "./rpc.js";
 import { createStore } from "./store.js";
 
-const TOOLS = ["artifact_write", "artifact_edit", "artifact_read"];
+const TOOLS = ["artifact_write", "artifact_edit", "artifact_read", "artifact_delete"];
 
 const WRITE_DESCRIPTION = [
   "Write the session's artifact: a Markdown document the user reads, edits and comments in a panel next to the chat.",
@@ -38,6 +38,22 @@ const EDIT_DESCRIPTION = [
 ].join(" ");
 
 const READ_DESCRIPTION = "Read the session's artifact as it is now, including the user's own edits.";
+
+// Deletion cannot be undone and takes the user's unsent comments with it: the
+// description restricts it to an explicit request, and the tool makes the
+// agent quote that request, which the chat shows next to the call.
+const DELETE_DESCRIPTION = [
+  "Delete the session's artifact for good, with the comments the user has not sent yet. It cannot be undone.",
+  "Only call it when the user explicitly asks to delete or discard the artifact, in their latest message.",
+  "Never call it on your own initiative: not to start over, not to write a different document, not to clean up",
+  "at the end of a task. To replace the content, use artifact_write; to change part of it, use artifact_edit.",
+].join(" ");
+
+const DeleteInput = Schema.Struct({
+  request: Schema.String.annotate({
+    description: "The user's words asking for the deletion, quoted from their message",
+  }),
+});
 
 // The text goes in a nested object: the TUI's summary of a tool call shows
 // only top-level plain values, so the chat shows `artifact_write [title=…]`
@@ -78,7 +94,8 @@ export default Plugin.define({
   id: "opencode-artifact",
   setup: async (ctx) => {
     const store = createStore(ctx.storage);
-    let emit: (sessionID: string, artifact: Artifact, by: "agent" | "user") => Promise<void> = async () => {};
+    // `deleted`: the panel goes back to its empty state, without opening itself as for an agent's write.
+    let emit: (sessionID: string, artifact: Artifact, by: "agent" | "user" | "deleted") => Promise<void> = async () => {};
 
     const rpc = await ctx.rpc.register(ArtifactRpc, {
       // The host types RPC input as unknown: check it rather than trust it.
@@ -170,6 +187,23 @@ export default Plugin.define({
         execute: async (_input, context) => {
           const artifact = await store.read(context.sessionID);
           return { content: renderForModel(artifact), metadata: { revision: artifact.revision } };
+        },
+      });
+      tools.add({
+        name: "artifact_delete",
+        options: { codemode: false },
+        description: DELETE_DESCRIPTION,
+        input: DeleteInput,
+        execute: async (input, context) => {
+          if (!input.request.trim()) throw new Error("Quote the user's request to delete the artifact in `request`.");
+          const removed = await store.remove(context.sessionID);
+          if (!exists(removed)) return { content: "This session has no artifact: nothing to delete.", metadata: {} };
+          await emit(context.sessionID, { ...removed, revision: 0 }, "deleted");
+          const unsent = removed.comments.length;
+          return {
+            content: `Artifact "${removed.title}" deleted${unsent > 0 ? `, with ${unsent} unsent comment${unsent > 1 ? "s" : ""}` : ""}.`,
+            metadata: { title: removed.title },
+          };
         },
       });
     });
