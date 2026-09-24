@@ -3,6 +3,8 @@
 A Markdown document per session that the agent writes and you review, edit and comment in a
 panel next to the chat, for opencode 2.
 
+![The artifact panel next to the chat: the review sent as one message on the left, the revised document on the right](docs/screenshot.png)
+
 Long content (a plan, a spec, a report) goes in the artifact instead of the chat: the agent
 replies in a sentence, the document stays on screen while you iterate, and you never scroll
 back to find the latest version.
