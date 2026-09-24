@@ -30,6 +30,8 @@ const WRITE_DESCRIPTION = [
   "Use it for long structured content the user should review and iterate on (a plan, a spec, a design, a report),",
   "instead of putting that content in your reply: once written, reply in one or two sentences and let the user review it.",
   "Replaces the whole document. For a targeted change, use artifact_edit.",
+  "Images show in the panel when written as their own paragraph, ![caption](source), with a path relative to the project,",
+  "an absolute path or an http(s) URL (PNG, JPEG, WebP or GIF).",
 ].join(" ");
 
 const EDIT_DESCRIPTION = [

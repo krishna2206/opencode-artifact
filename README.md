@@ -34,6 +34,12 @@ back to find the latest version.
   selected, only `c` and `esc` (cancel) work: the other keys wait until it is commented or
   cancelled. Once a comment is added, the keyboard goes back to the prompt. A selection in
   the panel is not copied to the clipboard (the chat keeps opencode's copy on select).
+- Images (`![caption](source)`) show in read mode under the text of their paragraph, as tall
+  as their proportions need up to `maxImageRows`, with their caption. The source can be a
+  path relative to the session's directory, an absolute or `~/` path, a `file://`, `data:`
+  or `http(s)` URL; PNG, JPEG, WebP and GIF. They use the terminal's image protocol when it
+  has one (kitty, sixel), coloured half blocks otherwise. An image that cannot be shown
+  leaves a `⚠ image not shown` line.
 - `e` switches to the raw Markdown editor: `ctrl+s` saves, `ctrl+k` comments the selected
   text (a selection is required), `ctrl+d` discards. Commented passages are highlighted in
   the editor.
@@ -68,6 +74,8 @@ Then declare the built `dist` directory in `~/.config/opencode/opencode.jsonc`:
 | Option | Default | Meaning |
 |---|---|---|
 | `autoOpen` | `true` | Open the panel when the agent writes the artifact |
+| `remoteImages` | `true` | Fetch `http(s)` images: a request from your TUI to a URL the agent wrote |
+| `maxImageRows` | `16` | The most rows an image takes in read mode |
 
 ## How it works
 
@@ -80,8 +88,9 @@ Then declare the built `dist` directory in `~/.config/opencode/opencode.jsonc`:
 - **TUI** (`src/tui.tsx`): the `session.panel` slot, the palette and slash command.
   `src/syntax.ts` ports the chat's colour rules (Markdown and code blocks) from
   `@opencode/theme`, since the host's syntax style is not part of the plugin API.
-- **Pure logic** (`src/artifact.ts`, `src/layout.ts`): writes, edits, comments, the review
-  message, and where each comment goes in the read view, covered by `pnpm test`.
+- **Pure logic** (`src/artifact.ts`, `src/layout.ts`, `src/images.ts`): writes, edits,
+  comments, the review message, where each comment and image goes in the read view, and
+  where an image is read from, covered by `pnpm test`.
 
 ## Limits
 
@@ -89,6 +98,12 @@ Then declare the built `dist` directory in `~/.config/opencode/opencode.jsonc`:
 - Comments are anchored by the quoted text. A passage selected in read mode has lost its
   Markdown markers; the match tolerates emphasis, list and quote markers, but not links
   (rendered as `text (url)`). A comment whose passage is not found shows after the last block.
+- Only images in a paragraph are drawn: in a list, a quote or a table they stay a caption
+  and a link. SVG is not supported.
+- An image cut by the panel's edge is cropped and sent to the terminal again at each scroll
+  step, which can stutter a little. Images are handed to the renderer at about twice their
+  shown size so it crops them itself: some terminals (Warp) squeeze the whole image into the
+  visible rows when asked to show only part of it.
 - The editor highlights by character offset: wide characters (emoji, CJK) before a commented
   passage shift its highlight.
 

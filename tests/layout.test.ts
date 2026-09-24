@@ -32,3 +32,19 @@ describe("layout", () => {
     expect(trailing.map((c) => c.id)).toEqual(["general", "missing"]);
   });
 });
+
+describe("images", () => {
+  it("pulls the images out of a paragraph, and drops its text when it has none", () => {
+    const blocks = splitBlocks("![Diagram](docs/a.png)\n\nSee ![one](x.png) and [![two](y.png)](https://z)\n");
+    expect(blocks[0]!.text).toBe(false);
+    expect(blocks[0]!.images).toEqual([{ src: "docs/a.png", alt: "Diagram" }]);
+    expect(blocks[1]!.text).toBe(true);
+    expect(blocks[1]!.images.map((image) => image.src)).toEqual(["x.png", "y.png"]);
+  });
+
+  it("keeps several images on their own as an image-only block", () => {
+    const [block] = splitBlocks("![a](a.png)\n![b](b.png)\n");
+    expect(block!.text).toBe(false);
+    expect(block!.images).toHaveLength(2);
+  });
+});

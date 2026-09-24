@@ -5,9 +5,18 @@
 // comments waiting to be sent. `s` sends them to the agent as one message.
 
 import { Plugin } from "@opencode/plugin/tui";
-import { RGBA, TextAttributes, type Renderable, type Selection, type TextareaRenderable } from "@opentui/core";
+import { homedir } from "node:os";
+import {
+  NativeImage,
+  RGBA,
+  TextAttributes,
+  type Renderable,
+  type Selection,
+  type TextareaRenderable,
+} from "@opentui/core";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { EMPTY_ARTIFACT, exists, locateQuote, type Artifact, type Comment } from "./artifact.js";
+import { resolveImage, type ImageRef, type ResolvedImage } from "./images.js";
 import { layout } from "./layout.js";
 import { ArtifactRpc } from "./rpc.js";
 import { buildSyntax, COMMENT_STYLE } from "./syntax.js";
@@ -23,10 +32,17 @@ const COMMENT_TYPE = "artifact-comment";
 interface Options {
   /** Open the panel when the agent writes the artifact of the session on screen. */
   autoOpen: boolean;
+  /** Fetch http(s) images: a request from the TUI to a URL the agent chose. */
+  remoteImages: boolean;
+  /** The most rows an image takes in the read view. */
+  maxImageRows: number;
 }
 
 const readOptions = (options: Readonly<Record<string, unknown>>): Options => ({
   autoOpen: options.autoOpen !== false,
+  remoteImages: options.remoteImages !== false,
+  maxImageRows:
+    typeof options.maxImageRows === "number" && options.maxImageRows >= 3 ? Math.floor(options.maxImageRows) : 16,
 });
 
 /** The session's directory: RPC calls must reach the server plugin of that location. */
@@ -102,7 +118,7 @@ function Commands(props: { ctx: Ctx; options: Options }) {
 
 type Mode = "view" | "edit";
 
-function ArtifactPanel(props: { ctx: Ctx; input: PanelInput }) {
+function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options }) {
   const ctx = props.ctx;
   const theme = () => ctx.theme;
   const client = ctx.client.rpc(ArtifactRpc);
@@ -405,15 +421,32 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput }) {
                         paddingBottom={block.comments.length > 0 ? 1 : 0}
                         backgroundColor={block.comments.length > 0 ? commentedBackground() : undefined}
                       >
-                        <markdown
-                          syntaxStyle={syntax()}
-                          content={block.raw.trimEnd()}
-                          conceal
-                          internalBlockMode="top-level"
-                          tableOptions={{ style: "grid", cellPaddingX: 1 }}
-                          fg={markdownText()}
-                          bg={block.comments.length > 0 ? commentedBackground() : undefined}
-                        />
+                        <Show when={block.text}>
+                          <markdown
+                            syntaxStyle={syntax()}
+                            content={block.raw.trimEnd()}
+                            conceal
+                            internalBlockMode="top-level"
+                            tableOptions={{ style: "grid", cellPaddingX: 1 }}
+                            fg={markdownText()}
+                            bg={block.comments.length > 0 ? commentedBackground() : undefined}
+                          />
+                        </Show>
+                        <For each={block.images}>
+                          {(image, position) => (
+                            <ArtifactImage
+                              ctx={ctx}
+                              image={image}
+                              resolved={resolveImage(image.src, {
+                                directory: sessionLocation(ctx, sessionID())?.directory,
+                                home: homedir(),
+                                remote: props.options.remoteImages,
+                              })}
+                              maxRows={props.options.maxImageRows}
+                              spaced={block.text || position() > 0}
+                            />
+                          )}
+                        </For>
                       </box>
                       <For each={block.comments}>
                         {(comment, position) => (
@@ -471,6 +504,150 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput }) {
           {hints()}
         </text>
       </box>
+    </box>
+  );
+}
+
+/** A short reason for an image that did not load, from the loader's error. */
+function loadFailure(error: unknown): string {
+  const failure = error as { code?: string; status?: number } | undefined;
+  if (failure?.code === "http-status" && failure.status) return `HTTP ${failure.status}`;
+  if (failure?.code === "file-read") return "file not found or unreadable";
+  if (failure?.code === "network") return "network error";
+  return "not a PNG, JPEG, WebP or GIF image";
+}
+
+/** How much larger than shown, each way, an image is handed to the renderer (see ArtifactImage). */
+const SCALE_MARGIN = 2.2;
+
+/** The size of one terminal cell in pixels, when the terminal reports it. */
+function cellPixels(ctx: Ctx): { width: number; height: number } | undefined {
+  const renderer = ctx.renderer;
+  const resolution = renderer.resolution;
+  if (!resolution || renderer.terminalWidth <= 0 || renderer.terminalHeight <= 0) return undefined;
+  const width = resolution.width / renderer.terminalWidth;
+  const height = resolution.height / renderer.terminalHeight;
+  return width > 0 && height > 0 ? { width, height } : undefined;
+}
+
+/**
+ * An image of the document, as tall as its proportions need up to `maxRows`,
+ * with its caption. It shows in the terminal's image protocol when there is
+ * one (kitty, sixel) and in coloured half blocks otherwise. A source that
+ * cannot be shown leaves a line saying so.
+ *
+ * With the kitty protocol, the renderer shows an image cut by the panel's
+ * edge in one of two ways. An image at least twice the shown size, each way,
+ * it scales and crops itself, and sends again at each scroll step. A smaller
+ * one it sends once, and asks the terminal to show only the visible part:
+ * Warp ignores that part and squeezes the whole image into the visible rows.
+ * So the image is loaded once and scaled here to a little over twice its
+ * shown size: the renderer crops it itself, correct in every terminal, from an
+ * image far smaller than a full-size screenshot, so each step costs less.
+ */
+function ArtifactImage(props: {
+  ctx: Ctx;
+  image: ImageRef;
+  resolved: ResolvedImage;
+  maxRows: number;
+  /** A row above the image: it follows text or another image. */
+  spaced: boolean;
+}) {
+  const theme = () => props.ctx.theme;
+  /** Why the image cannot be shown. */
+  const [failed, setFailed] = createSignal<string>();
+  const [original, setOriginal] = createSignal<NativeImage>();
+  /** Columns available to the image, as laid out. */
+  const [columns, setColumns] = createSignal(0);
+
+  const source = () => (props.resolved.kind === "blocked" ? undefined : props.resolved.source);
+
+  createEffect(
+    on(source, (value) => {
+      setFailed(undefined);
+      setOriginal(undefined);
+      if (!value) return;
+      const controller = new AbortController();
+      let loaded: NativeImage | undefined;
+      NativeImage.load(value, { signal: controller.signal }).then(
+        (image) => {
+          if (controller.signal.aborted) return image.dispose();
+          loaded = image;
+          setOriginal(image);
+        },
+        (error: unknown) => {
+          if (!controller.signal.aborted) setFailed(loadFailure(error));
+        },
+      );
+      onCleanup(() => {
+        controller.abort();
+        loaded?.dispose();
+      });
+    }),
+  );
+
+  // The image as shown: its rows, and pixels scaled to them.
+  const shown = createMemo((previous?: { image: NativeImage; rows: number; from: NativeImage }) => {
+    const image = original();
+    const available = columns();
+    if (!image || available <= 0) return undefined;
+    const cell = cellPixels(props.ctx) ?? { width: 1, height: 2 };
+    // Width over height, in cells.
+    const aspect = (image.width / image.height) * (cell.height / cell.width);
+    const width = Math.max(1, Math.min(available, Math.round(props.maxRows * aspect)));
+    const rows = Math.max(1, Math.min(props.maxRows, Math.round(width / aspect)));
+    // A little over twice the shown pixels each way: the renderer crops itself
+    // from four times the shown area, and its own rounding of the shown size
+    // (to whole cells) must not bring the image just under that.
+    const pixelWidth = Math.ceil(width * cell.width * SCALE_MARGIN);
+    const pixelHeight = Math.ceil(rows * cell.height * SCALE_MARGIN);
+    // Without the terminal's pixel size there is no kitty placement to fix.
+    const scale = cellPixels(props.ctx) !== undefined;
+    if (previous?.from === image && previous.rows === rows && previous.image.width === (scale ? pixelWidth : image.width)) {
+      return previous;
+    }
+    return { image: scale ? image.resize({ width: pixelWidth, height: pixelHeight }) : image.retain(), rows, from: image };
+  });
+  // Each scaled copy is released once replaced; the image component keeps its own reference.
+  createEffect(() => {
+    const current = shown();
+    onCleanup(() => current?.image.dispose());
+  });
+
+  const reason = () => (props.resolved.kind === "blocked" ? props.resolved.reason : failed());
+
+  return (
+    <box flexDirection="column" flexShrink={0} marginTop={props.spaced ? 1 : 0}>
+      <Show
+        when={!reason()}
+        fallback={
+          <text fg={theme().text.feedback.warning.base} wrapMode="none" truncate>
+            {`⚠ image not shown: ${props.image.src} (${reason()})`}
+          </text>
+        }
+      >
+        <box
+          width="100%"
+          height={shown()?.rows ?? 1}
+          onSizeChange={function (this: Renderable) {
+            setColumns(this.width);
+          }}
+        >
+          <Show when={shown()}>
+            {(current: () => { image: NativeImage; rows: number }) => (
+              <image source={current().image} fit="fit" protocol="auto" width="100%" height={current().rows} />
+            )}
+          </Show>
+        </box>
+      </Show>
+      {/* Centred like the image, which the component centres in the panel's width. */}
+      <Show when={props.image.alt}>
+        <box flexDirection="row" width="100%" justifyContent="center" marginTop={1}>
+          <text fg={theme().text.muted} attributes={TextAttributes.ITALIC}>
+            {props.image.alt}
+          </text>
+        </box>
+      </Show>
     </box>
   );
 }
@@ -537,7 +714,7 @@ export default Plugin.define({
       append: "session.panel",
       render: (input) => (
         <Show when={input.name === PANEL}>
-          <ArtifactPanel ctx={ctx} input={input} />
+          <ArtifactPanel ctx={ctx} input={input} options={options} />
         </Show>
       ),
     });

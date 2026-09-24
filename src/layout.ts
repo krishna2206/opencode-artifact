@@ -1,15 +1,21 @@
 // How the read view lays the document out: its top-level Markdown blocks,
 // each followed by the comments on it. Comments that cannot be placed (a
-// general comment, or a passage no longer in the text) go after the last block.
+// passage no longer in the text) go after the last block. The images of a
+// paragraph are pulled out of it: the Markdown component only shows their
+// caption, the read view draws them below the paragraph's text.
 
-import { Lexer } from "marked";
+import { Lexer, type Token } from "marked";
 import { locateQuote, type Comment } from "./artifact.js";
+import type { ImageRef } from "./images.js";
 
 export interface Block {
   /** The block's Markdown source. */
   raw: string;
   start: number;
   end: number;
+  /** Whether the block has text to render: false for a paragraph made only of images. */
+  text: boolean;
+  images: ImageRef[];
   comments: Comment[];
 }
 
@@ -28,9 +34,32 @@ export function splitBlocks(content: string): Omit<Block, "comments">[] {
     const at = start >= 0 ? start : offset;
     offset = at + token.raw.length;
     if (token.type === "space" || !token.raw.trim()) continue;
-    blocks.push({ raw: token.raw, start: at, end: offset });
+    const inline = token.type === "paragraph" ? (token.tokens ?? []) : [];
+    const images = paragraphImages(inline);
+    const text = images.length === 0 || !onlyImages(inline);
+    blocks.push({ raw: token.raw, start: at, end: offset, text, images });
   }
   return blocks;
+}
+
+/** The images of a paragraph, including one wrapped in a link. */
+function paragraphImages(tokens: readonly Token[]): ImageRef[] {
+  return tokens.flatMap((token): ImageRef[] => {
+    if (token.type === "image") return [{ src: token.href, alt: token.text }];
+    if ("tokens" in token && Array.isArray(token.tokens)) return paragraphImages(token.tokens);
+    return [];
+  });
+}
+
+/** A paragraph with nothing but images and blank space between them. */
+function onlyImages(tokens: readonly Token[]): boolean {
+  return tokens.every(
+    (token) =>
+      token.type === "image" ||
+      token.type === "br" ||
+      (token.type === "text" && !token.raw.trim()) ||
+      (token.type === "link" && Array.isArray(token.tokens) && onlyImages(token.tokens)),
+  );
 }
 
 /** Each comment goes under the block where its passage ends. */
