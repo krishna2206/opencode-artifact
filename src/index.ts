@@ -22,6 +22,7 @@ import {
 } from "./artifact.js";
 import { ArtifactRpc } from "./rpc.js";
 import { createStore } from "./store.js";
+import { isNotFound, sweepOrphans } from "./sweep.js";
 
 const TOOLS = ["artifact_write", "artifact_edit", "artifact_read", "artifact_delete"];
 
@@ -225,6 +226,17 @@ export default Plugin.define({
         text: `# Session artifact\nThis session has an artifact, "${artifact.title}" (revision ${artifact.revision}). Read it with artifact_read before changing it.`,
       });
     });
+
+    // Artifacts left behind by sessions deleted while this plugin was not running.
+    const sessionExists = async (sessionID: string) => {
+      try {
+        await ctx.session.get({ sessionID });
+        return true;
+      } catch (error) {
+        return !isNotFound(error);
+      }
+    };
+    void sweepOrphans(ctx.storage, sessionExists, Date.now()).catch(() => {});
 
     // A deleted session's artifact goes with it.
     const stop = new AbortController();

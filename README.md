@@ -80,7 +80,10 @@ Then declare the built `dist` directory in `~/.config/opencode/opencode.jsonc`:
 ## How it works
 
 - **Server** (`src/index.ts`): the tools, the RPC methods the panel calls, the compaction
-  reminder, and cleanup when a session is deleted. Artifacts are kept in opencode's own
+  reminder, and cleanup: a session's artifact is removed when the session is deleted, and a
+  daily sweep (`src/sweep.ts`) removes artifacts whose session was deleted while the plugin
+  was not running. An artifact is only removed when opencode reports its session as not
+  found, never on another error. Artifacts are kept in opencode's own
   key-value storage (`ctx.storage`), scoped to this plugin; nothing is written to your
   repositories.
 - **RPC** (`src/rpc.ts`): `get`, `save`, `comment`, `uncomment`, `submit`, and a `changed`
@@ -88,9 +91,9 @@ Then declare the built `dist` directory in `~/.config/opencode/opencode.jsonc`:
 - **TUI** (`src/tui.tsx`): the `session.panel` slot, the palette and slash command.
   `src/syntax.ts` ports the chat's colour rules (Markdown and code blocks) from
   `@opencode/theme`, since the host's syntax style is not part of the plugin API.
-- **Pure logic** (`src/artifact.ts`, `src/layout.ts`, `src/images.ts`): writes, edits,
-  comments, the review message, where each comment and image goes in the read view, and
-  where an image is read from, covered by `pnpm test`.
+- **Pure logic** (`src/artifact.ts`, `src/layout.ts`, `src/images.ts`, `src/sweep.ts`):
+  writes, edits, comments, the review message, where each comment and image goes in the read
+  view, where an image is read from, and the sweep, covered by `pnpm test`.
 
 ## Limits
 
