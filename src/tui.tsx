@@ -5,6 +5,7 @@
 // comments waiting to be sent. `s` sends them to the agent as one message.
 
 import { Plugin } from "@opencode/plugin/tui";
+import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import {
   NativeImage,
@@ -15,7 +16,18 @@ import {
   type TextareaRenderable,
 } from "@opentui/core";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
-import { EMPTY_ARTIFACT, exists, locateQuote, type Artifact, type Comment } from "./artifact.js";
+import {
+  clock,
+  EMPTY_ARTIFACT,
+  exists,
+  INSTRUCTION_KEY,
+  instructionText,
+  locateQuote,
+  span,
+  type Artifact,
+  type Comment,
+  type RevisionInfo,
+} from "./artifact.js";
 import { resolveImage, type ImageRef, type ResolvedImage } from "./images.js";
 import { layout } from "./layout.js";
 import { ArtifactRpc } from "./rpc.js";
@@ -113,8 +125,69 @@ function Commands(props: { ctx: Ctx; options: Options }) {
     onCleanup(unsubscribe);
   }
 
+  // The agent learns of the changes it did not make itself (undo, redo, the
+  // user's edits) the way it learns the date changed: through an instruction
+  // entry of the session, which opencode adds to the conversation whenever it
+  // changes. Only the client can set one, so the TUI keeps it in step.
+  const told = new Map<string, number>();
+  const unsubscribeNotices = client.events.on("changed", (event) => {
+    const { sessionID, by, notice } = event.data as { sessionID: string; by: string; notice: number };
+    if (by === "deleted") {
+      if (!told.has(sessionID) && notice === 0) return;
+      told.delete(sessionID);
+      void ctx.client.session.instructions.entry.remove({ sessionID, key: INSTRUCTION_KEY }).catch(() => {});
+      return;
+    }
+    if (notice === 0 || told.get(sessionID) === notice) return;
+    told.set(sessionID, notice);
+    void (async () => {
+      const artifact = (await client.get({ sessionID }, { location: sessionLocation(ctx, sessionID) })) as Artifact;
+      const text = instructionText(artifact);
+      if (text) await ctx.client.session.instructions.entry.put({ sessionID, key: INSTRUCTION_KEY, value: text });
+    })().catch(() => told.delete(sessionID));
+  });
+  onCleanup(unsubscribeNotices);
+
   return null;
 }
+
+/** Copies through the terminal (OSC 52), and the system's clipboard tool when there is one. */
+async function copyText(ctx: Ctx, text: string): Promise<boolean> {
+  let copied = false;
+  try {
+    copied = ctx.renderer.copyToClipboardOSC52(text);
+  } catch {
+    // The terminal cannot: the system's tool below may.
+  }
+  const tools: [string, string[]][] =
+    process.platform === "darwin"
+      ? [["pbcopy", []]]
+      : process.platform === "win32"
+        ? [["clip", []]]
+        : [
+            ["wl-copy", []],
+            ["xclip", ["-selection", "clipboard"]],
+          ];
+  for (const [command, args] of tools) {
+    if (await pipeTo(command, args, text)) return true;
+  }
+  return copied;
+}
+
+function pipeTo(command: string, args: string[], text: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    try {
+      const child = spawn(command, args, { stdio: ["pipe", "ignore", "ignore"] });
+      child.on("error", () => resolve(false));
+      child.on("close", (code) => resolve(code === 0));
+      child.stdin.end(text);
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+
 
 type Mode = "view" | "edit";
 
@@ -307,16 +380,72 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
     }
   };
 
+  // Undo goes to the revision before, when it is still kept; redo to the one after.
+  const canUndo = () => artifact().history.some((info) => info.revision === artifact().revision - 1);
+  const canRedo = () => exists(artifact()) && artifact().revision < artifact().latest;
+
+  const switchTo = async (revision: number) => {
+    if (mode() === "edit") {
+      ctx.ui.toast.show({ message: "Save or discard your edits first.", variant: "info" });
+      return;
+    }
+    const next = (await client.switch({ sessionID: sessionID(), revision }, location())) as Artifact;
+    setArtifact(next);
+  };
+  const undo = () => canUndo() && void switchTo(artifact().revision - 1);
+  const redo = () => canRedo() && void switchTo(artifact().revision + 1);
+
+  const copy = async () => {
+    const current = artifact();
+    if (!exists(current)) return;
+    const text = mode() === "edit" && editor ? editor.plainText : current.content;
+    const copied = await copyText(ctx, text);
+    ctx.ui.toast.show(
+      copied
+        ? { message: `Copied revision ${current.revision}${mode() === "edit" ? " with your unsaved edits" : ""}.`, variant: "success" }
+        : { message: "Could not copy: no clipboard reachable from this terminal.", variant: "error" },
+    );
+  };
+
+  const describe = (info: RevisionInfo) => {
+    const who = info.by === "user" ? "you" : "agent";
+    const what = info.kind === "save" ? "edited" : info.kind === "edit" ? "edit" : info.kind === "append" ? "append" : "write";
+    return `${who} · ${what} · ${clock(info.at)} · ${info.lines} line${info.lines === 1 ? "" : "s"}`;
+  };
+
+  const history = async () => {
+    const current = artifact();
+    if (!exists(current)) return;
+    const revision = await ask(() =>
+      ctx.ui.dialog.select({
+        title: `Revisions of “${truncate(current.title, 40)}”`,
+        current: current.revision,
+        options: [...current.history].reverse().map((info) => ({
+          title: `rev ${info.revision}${info.revision === current.revision ? " (current)" : info.revision > current.revision ? " (redo)" : ""}`,
+          value: info.revision,
+          // The title only when it differs from the document's now.
+          description: `${info.title !== current.title ? `${truncate(info.title, 30)} · ` : ""}${describe(info)}`,
+        })),
+      }),
+    );
+    if (revision !== undefined && revision !== artifact().revision) await switchTo(revision);
+  };
+
   const idle = () => !selected();
-  // A review goes out with at least one comment; edits alone wait for one.
+  // A review goes out with at least one comment.
   const canSend = () => idle() && artifact().comments.length > 0;
+  const has = () => idle() && exists(artifact());
   ctx.keymap.layer(() => ({
     enabled: () => props.input.focused && !asking() && mode() === "view",
     priority: 10,
     // While a passage is selected, only commenting it (or esc) is possible.
     commands: [
       { bind: "c", title: "Comment", group: "Artifact", enabled: () => !!selected(), run: () => void comment() },
-      { bind: "e", title: "Edit", group: "Artifact", enabled: idle, run: startEdit },
+      { bind: "e", title: "Edit", group: "Artifact", enabled: has, run: startEdit },
+      { bind: "u", title: "Undo: previous revision", group: "Artifact", enabled: () => idle() && canUndo(), run: undo },
+      { bind: "r", title: "Redo: next revision", group: "Artifact", enabled: () => idle() && canRedo(), run: redo },
+      { bind: "h", title: "Revisions", group: "Artifact", enabled: has, run: () => void history() },
+      { bind: "y", title: "Copy the document", group: "Artifact", enabled: has, run: () => void copy() },
       { bind: "s", title: "Send review", group: "Artifact", enabled: canSend, run: () => void send() },
       { bind: "f", title: "Fullscreen", group: "Artifact", enabled: idle, run: () => props.input.toggleFullscreen() },
       { bind: "q", title: "Close", group: "Artifact", enabled: idle, run: () => props.input.close() },
@@ -338,7 +467,18 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
       ? "ctrl+s save · ctrl+k comment · ctrl+d discard"
       : selected()
         ? "c comment · esc cancel"
-        : `e edit${artifact().comments.length > 0 ? " · s send" : ""} · f fullscreen · q close`;
+        : !exists(artifact())
+          ? "q close"
+          : [
+              "e edit",
+              ...(canUndo() ? ["u undo"] : []),
+              ...(canRedo() ? ["r redo"] : []),
+              "h revisions",
+              "y copy",
+              ...(artifact().comments.length > 0 ? ["s send"] : []),
+              "f fullscreen",
+              "q close",
+            ].join(" · ");
 
   // Each top-level block of the document, followed by the comments on it.
   const placed = createMemo(() => layout(artifact().content, artifact().comments));
@@ -349,11 +489,7 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
     const current = artifact();
     if (!exists(current) || current.comments.length === 0) return "";
     const count = current.comments.length;
-    const parts = [
-      ...(count > 0 ? [`${count} comment${count > 1 ? "s" : ""}`] : []),
-      ...(current.editedByUser ? ["your edits"] : []),
-    ];
-    return `${parts.join(" + ")} ready to send to the agent`;
+    return `${count} comment${count > 1 ? "s" : ""} ready to send to the agent`;
   };
   const commentCount = () => {
     const count = artifact().comments.length;
@@ -375,21 +511,39 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
     props.input.close();
   };
 
-  // A plain bold X: the ✕ glyph is small in most terminal fonts.
-  const closeButton = () => (
+  /** An icon in the header that acts on click; muted while it cannot. */
+  const button = (label: string, enabled: () => boolean, run: () => void) => (
     <text
-      fg={theme().text.base}
-      attributes={TextAttributes.BOLD}
+      fg={enabled() ? theme().text.base : theme().text.muted}
+      attributes={enabled() ? TextAttributes.BOLD : TextAttributes.NONE}
       flexShrink={0}
+      wrapMode="none"
       selectable={false}
       onMouseUp={(event: { stopPropagation: () => void }) => {
         event.stopPropagation();
-        void close();
+        if (enabled() && !asking()) run();
       }}
     >
-      X
+      {label}
     </text>
   );
+
+  // A plain X: the ✕ glyph is small in most terminal fonts.
+  const closeButton = () => button("X", () => true, () => void close());
+
+  const separator = () => (
+    <text fg={theme().text.muted} flexShrink={0} selectable={false}>
+      ·
+    </text>
+  );
+
+  /** The revisions kept for redo, after the current one. */
+  const redoNotice = () => {
+    const current = artifact();
+    if (!exists(current) || current.revision >= current.latest) return "";
+    const one = current.revision + 1 === current.latest;
+    return `${one ? "Revision" : "Revisions"} ${span(current.revision + 1, current.latest)} ${one ? "is" : "are"} kept for redo · the next change replaces ${one ? "it" : "them"}.`;
+  };
 
   const changedWhileEditing = () => mode() === "edit" && artifact().content !== editBase();
 
@@ -427,14 +581,24 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
             {artifact().title}
           </text>
           <text fg={theme().text.muted} wrapMode="none" flexShrink={0}>
-            {`rev ${artifact().revision}${commentCount()}${artifact().editedByUser ? " · edited" : ""}${mode() === "edit" ? " · editing" : ""}`}
+            {`rev ${artifact().revision}/${artifact().latest}${commentCount()}${mode() === "edit" ? " · editing" : ""}`}
           </text>
           {/* The same separator as the footer's shortcuts. */}
-          <text fg={theme().text.muted} flexShrink={0} selectable={false}>
-            ·
-          </text>
+          {separator()}
+          {/* The icons fill their cell: one more column between them than the header's gap. */}
+          <box flexDirection="row" flexShrink={0} gap={2}>
+            {button("◀", () => mode() === "view" && canUndo(), undo)}
+            {button("▶", () => mode() === "view" && canRedo(), redo)}
+            {button("⧉", () => true, () => void copy())}
+          </box>
+          {separator()}
           {closeButton()}
         </box>
+        <Show when={redoNotice()}>
+          <text fg={theme().text.feedback.warning.base} wrapMode="none" truncate flexShrink={0}>
+            {redoNotice()}
+          </text>
+        </Show>
         <Show when={changedWhileEditing()}>
           <text fg={theme().text.feedback.warning.base} flexShrink={0}>
             The agent changed the document while you edit it.

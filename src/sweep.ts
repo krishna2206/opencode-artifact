@@ -34,11 +34,16 @@ export function isNotFound(error: unknown): boolean {
   return false;
 }
 
-/** Runs the sweep if the last one is older than the interval. Returns the sessions whose artifact was removed. */
+/**
+ * Runs the sweep if the last one is older than the interval. Returns the
+ * sessions whose artifact was removed. `removeArtifact` removes the artifact
+ * with its revisions; by default only its state.
+ */
 export async function sweepOrphans(
   storage: SweepStorage,
   sessionExists: (sessionID: string) => Promise<boolean>,
   now: number,
+  removeArtifact: (sessionID: string) => Promise<unknown> = (sessionID) => storage.remove(`${PREFIX}${sessionID}`),
 ): Promise<string[]> {
   const last = await storage.get(LAST_SWEEP_KEY);
   if (typeof last === "number" && now - last < SWEEP_INTERVAL_MS) return [];
@@ -52,7 +57,7 @@ export async function sweepOrphans(
     for (const { key } of page.entries) {
       const sessionID = key.slice(PREFIX.length);
       if (!sessionID || (await sessionExists(sessionID))) continue;
-      await storage.remove(key);
+      await removeArtifact(sessionID);
       removed.push(sessionID);
     }
     after = page.next;

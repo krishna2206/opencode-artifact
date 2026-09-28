@@ -10,11 +10,28 @@ const artifactSchema = {
   type: "object",
   properties: {
     revision: { type: "number" },
+    latest: { type: "number" },
     title: { type: "string" },
     content: { type: "string" },
+    history: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          revision: { type: "number" },
+          title: { type: "string" },
+          by: { type: "string", enum: ["agent", "user"] },
+          kind: { type: "string", enum: ["write", "edit", "append", "save"] },
+          at: { type: "number" },
+          lines: { type: "number" },
+        },
+        required: ["revision", "title", "by", "kind", "at", "lines"],
+      },
+    },
+    seq: { type: "number" },
+    appendable: { type: "boolean" },
     updatedAt: { type: "number" },
     updatedBy: { type: "string", enum: ["agent", "user"] },
-    editedByUser: { type: "boolean" },
     comments: {
       type: "array",
       items: {
@@ -28,8 +45,16 @@ const artifactSchema = {
         required: ["id", "quote", "note", "createdAt"],
       },
     },
+    events: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { at: { type: "number" }, text: { type: "string" } },
+        required: ["at", "text"],
+      },
+    },
   },
-  required: ["revision", "title", "content", "updatedAt", "updatedBy", "editedByUser", "comments"],
+  required: ["revision", "latest", "title", "content", "history", "seq", "appendable", "updatedAt", "updatedBy", "comments", "events"],
 } as const;
 
 export const ArtifactRpc = Rpc.define({
@@ -52,6 +77,15 @@ export const ArtifactRpc = Rpc.define({
         properties: { saved: { type: "boolean" }, artifact: artifactSchema },
         required: ["saved", "artifact"],
       },
+    },
+    /** Undo, redo or a jump in the history: moves to another kept revision. */
+    switch: {
+      input: {
+        type: "object",
+        properties: { ...session, revision: { type: "number" } },
+        required: ["sessionID", "revision"],
+      },
+      output: artifactSchema,
     },
     comment: {
       input: {
@@ -77,11 +111,19 @@ export const ArtifactRpc = Rpc.define({
     },
   },
   events: {
+    // `by`: "agent" for the agent's tools, "user" for the panel, "deleted" once removed.
+    // `notice`: when the last change the agent must be told about happened, 0 for none.
     changed: {
       schema: {
         type: "object",
-        properties: { ...session, revision: { type: "number" }, by: { type: "string" } },
-        required: ["sessionID", "revision", "by"],
+        properties: {
+          ...session,
+          revision: { type: "number" },
+          seq: { type: "number" },
+          by: { type: "string" },
+          notice: { type: "number" },
+        },
+        required: ["sessionID", "revision", "seq", "by", "notice"],
       },
     },
   },

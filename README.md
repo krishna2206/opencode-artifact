@@ -13,14 +13,47 @@ back to find the latest version.
 
 **For the agent**
 
-- `artifact_write`: writes the whole document (with an optional title).
+- `artifact_write`: writes the whole document (with an optional title), or adds to its end
+  with `mode: "append"` to build a long document in parts (the parts that follow a write make
+  one revision).
 - `artifact_edit`: replaces one passage, which must be unique unless `replace_all` is set.
-- `artifact_read`: reads the document as it is now, your edits included.
-- `artifact_delete`: deletes the document and its unsent comments. Its description limits it
+- `artifact_read`: reads the document as it is now, your edits included, or another revision
+  with `revision`. A long document comes a page at a time (`offset`, `limit`, in lines), under
+  opencode's own truncation of tool results, which would otherwise hide the end of it.
+- `artifact_switch`: moves to another revision, to undo or redo, when you ask the agent for an
+  earlier or later version. Nothing is changed or lost.
+- `artifact_write` and `artifact_edit` take an optional `base_revision`: the change is refused
+  if the document is no longer on the revision the agent last read.
+- `artifact_delete`: deletes the document, its revisions and its unsent comments. Its description limits it
   to an explicit request from you, and the agent must quote that request in the call
   (`artifact_delete [request=…]` in the chat). Replacing the content goes through
   `artifact_write` instead.
 - After a compaction, a one-line reminder tells the agent the session has an artifact.
+
+**Revisions**
+
+Each change is a revision: a write or edit by the agent, a save of your edits. They form a
+line with a cursor, like an editor's undo history:
+
+- Undo and redo move the cursor to the revision before or after; the revisions after it stay
+  for redo. You do it from the panel, the agent with `artifact_switch`.
+- The next change, yours or the agent's, starts from the revision under the cursor and
+  replaces the ones after it: there are no branches. Write rev 1 to 4, undo to 3, ask for a
+  change: it becomes the new rev 4.
+- The title is part of each revision. Comments are not: they stay when you switch.
+- 50 revisions are kept (`maxRevisions`); the oldest go first.
+
+**What the agent is told**
+
+Its own writes, edits and switches it learns from the tool results. The other changes (your
+undo, redo or jump, a save of your edits, and its own switch) reach it the way opencode
+tells it the date changed: an instruction entry of the session, `artifact`, which opencode
+adds to the conversation as a system message (`◈ Instructions updated: api/artifact` in the
+chat) at the agent's next step, without starting a turn or touching the system prompt. It
+lists the last five such changes, dated, never the document itself; deleting the artifact
+removes it ("no longer applies"). The TUI sets the entry, since the plugin API does not give
+the server side access to it: without a TUI open (`opencode run`), only the tool results
+tell the agent. The entry API is under `/api/experimental` in opencode 2.0.18.
 
 **In the TUI**
 
@@ -40,12 +73,18 @@ back to find the latest version.
   or `http(s)` URL; PNG, JPEG, WebP and GIF. They use the terminal's image protocol when it
   has one (kitty, sixel), coloured half blocks otherwise. An image that cannot be shown
   leaves a `⚠ image not shown` line.
+- The header shows `rev 3/4`, and `◀` undo, `▶` redo and `⧉` copy buttons next to the `X`; `u`,
+  `r` and `y` do the same. When revisions are kept for redo, a line under the header says
+  the next change replaces them. `h` lists the revisions (who, what, when, lines) to jump to
+  one. Undo, redo and jumps wait while the editor has unsaved edits.
+- `copy` copies the document as shown (the editor's text while editing), through the
+  terminal (OSC 52) and the system's clipboard tool (`pbcopy`, `wl-copy` or `xclip`, `clip`).
 - `e` switches to the raw Markdown editor: `ctrl+s` saves, `ctrl+k` comments the selected
   text (a selection is required), `ctrl+d` discards. Commented passages are highlighted in
   the editor.
 - `s` sends the review, once there is at least one comment (the key and its hint appear
-  then): your comments, with the passages they are about, and whether you edited the text,
-  as one short message the agent receives after its current turn. The footer counts what
+  then): your comments, with the passages they are about, as one short message the agent
+  receives after its current turn. Your edits reach it on their own (see above). The footer counts what
   is ready to send.
 - `f` toggles fullscreen, `q` or the `X` in the header closes the panel (asking first if the
   editor has unsaved edits). The panel's width can be dragged.
@@ -77,6 +116,7 @@ Then declare the built `dist` directory in `~/.config/opencode/opencode.jsonc`:
 | `autoOpen` | `true` | Open the panel when the agent writes the artifact |
 | `remoteImages` | `true` | Fetch `http(s)` images: a request from your TUI to a URL the agent wrote |
 | `maxImageRows` | `16` | The most rows an image takes in read mode |
+| `maxRevisions` | `50` | The revisions kept per artifact (server option) |
 
 ## How it works
 
@@ -86,14 +126,17 @@ Then declare the built `dist` directory in `~/.config/opencode/opencode.jsonc`:
   was not running. An artifact is only removed when opencode reports its session as not
   found, never on another error. Artifacts are kept in opencode's own
   key-value storage (`ctx.storage`), scoped to this plugin; nothing is written to your
-  repositories.
-- **RPC** (`src/rpc.ts`): `get`, `save`, `comment`, `uncomment`, `submit`, and a `changed`
-  event after every change.
-- **TUI** (`src/tui.tsx`): the `session.panel` slot, the palette and slash command.
+  repositories. `session/<id>` holds the state and the current text, `rev/<id>/<n>` the
+  text of each revision kept (`src/store.ts`). An artifact from the first version becomes
+  its own revision at its next change.
+- **RPC** (`src/rpc.ts`): `get`, `save`, `switch`, `comment`, `uncomment`, `submit`, and a
+  `changed` event after every change.
+- **TUI** (`src/tui.tsx`): the `session.panel` slot, the palette and slash command, and the
+  session's `artifact` instruction entry, kept in step on each `changed` event.
   `src/syntax.ts` ports the chat's colour rules (Markdown and code blocks) from
   `@opencode/theme`, since the host's syntax style is not part of the plugin API.
 - **Pure logic** (`src/artifact.ts`, `src/layout.ts`, `src/images.ts`, `src/sweep.ts`):
-  writes, edits, comments, the review message, where each comment and image goes in the read
+  writes, edits, revisions, comments, the review message, the instruction entry, paged reads, where each comment and image goes in the read
   view, where an image is read from, and the sweep, covered by `pnpm test`.
 
 ## Limits

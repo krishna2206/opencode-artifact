@@ -41,6 +41,13 @@ describe("sweepOrphans", () => {
     expect(await sweepOrphans(storage, exists, 1_000_000 + SWEEP_INTERVAL_MS)).toEqual(["b"]);
   });
 
+  it("removes each artifact through the given function", async () => {
+    const storage = memoryStorage(["session/a", "session/b"]);
+    const removedBy: string[] = [];
+    await sweepOrphans(storage, exists, 1_000_000, async (sessionID) => void removedBy.push(sessionID));
+    expect(removedBy).toEqual(["b"]);
+  });
+
   it("keeps an artifact when the lookup fails for another reason", async () => {
     const storage = memoryStorage(["session/x"]);
     const unsure = async () => true; // what sessionExists returns on a non-NotFound error
