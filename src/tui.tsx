@@ -21,12 +21,13 @@ import {
   EMPTY_ARTIFACT,
   exists,
   INSTRUCTION_KEY,
-  instructionText,
   locateQuote,
   span,
+  when,
   type Artifact,
   type Comment,
   type RevisionInfo,
+  type Summary,
 } from "./artifact.js";
 import { resolveImage, type ImageRef, type ResolvedImage } from "./images.js";
 import { layout } from "./layout.js";
@@ -80,6 +81,14 @@ function isWithin(renderable: Renderable | null | undefined, container: Renderab
   return false;
 }
 
+/**
+ * The artifact shown in each session's panel, chosen by the user or opened by
+ * an agent's write. It outlives the panel: closed and opened again, the panel
+ * shows the same one.
+ */
+const [chosen, setChosen] = createSignal<Readonly<Record<string, string>>>({});
+const choose = (sessionID: string, id: string) => setChosen((previous) => ({ ...previous, [sessionID]: id }));
+
 /** The palette entry, the /artifact slash command, and the automatic opening. */
 function Commands(props: { ctx: Ctx; options: Options }) {
   const ctx = props.ctx;
@@ -117,6 +126,8 @@ function Commands(props: { ctx: Ctx; options: Options }) {
     // Only for the session on screen: the panel opens in the current session.
     const unsubscribe = client.events.on("changed", (event) => {
       if (event.data.by !== "agent" || event.data.sessionID !== currentSession(ctx) || isOpen()) return;
+      // The panel opens on the artifact the agent wrote.
+      choose(event.data.sessionID as string, event.data.artifact as string);
       if (!ctx.ui.panel.open(PANEL)) return;
       // Opening a panel focuses it. Opened by the agent, it must not take the
       // keyboard from the prompt: the user may be typing the next message.
@@ -125,25 +136,29 @@ function Commands(props: { ctx: Ctx; options: Options }) {
     onCleanup(unsubscribe);
   }
 
+  // A renamed artifact stays the one shown.
+  const unsubscribeRenames = client.events.on("changed", (event) => {
+    const { sessionID, artifact, previous } = event.data as { sessionID: string; artifact: string; previous: string };
+    if (previous && chosen()[sessionID] === previous) choose(sessionID, artifact);
+  });
+  onCleanup(unsubscribeRenames);
+
   // The agent learns of the changes it did not make itself (undo, redo, the
-  // user's edits) the way it learns the date changed: through an instruction
-  // entry of the session, which opencode adds to the conversation whenever it
-  // changes. Only the client can set one, so the TUI keeps it in step.
+  // user's edits and renames) the way it learns the date changed: through an
+  // instruction entry of the session, which opencode adds to the conversation
+  // whenever it changes. Only the client can set one, so the TUI keeps it in
+  // step, for every artifact of the session.
   const told = new Map<string, number>();
   const unsubscribeNotices = client.events.on("changed", (event) => {
-    const { sessionID, by, notice } = event.data as { sessionID: string; by: string; notice: number };
-    if (by === "deleted") {
-      if (!told.has(sessionID) && notice === 0) return;
-      told.delete(sessionID);
-      void ctx.client.session.instructions.entry.remove({ sessionID, key: INSTRUCTION_KEY }).catch(() => {});
-      return;
-    }
-    if (notice === 0 || told.get(sessionID) === notice) return;
+    const { sessionID, notice } = event.data as { sessionID: string; notice: number };
+    if (told.get(sessionID) === notice || (notice === 0 && !told.has(sessionID))) return;
     told.set(sessionID, notice);
     void (async () => {
-      const artifact = (await client.get({ sessionID }, { location: sessionLocation(ctx, sessionID) })) as Artifact;
-      const text = instructionText(artifact);
-      if (text) await ctx.client.session.instructions.entry.put({ sessionID, key: INSTRUCTION_KEY, value: text });
+      const { instruction } = (await client.list({ sessionID }, { location: sessionLocation(ctx, sessionID) })) as {
+        instruction: string;
+      };
+      if (instruction) await ctx.client.session.instructions.entry.put({ sessionID, key: INSTRUCTION_KEY, value: instruction });
+      else await ctx.client.session.instructions.entry.remove({ sessionID, key: INSTRUCTION_KEY });
     })().catch(() => told.delete(sessionID));
   });
   onCleanup(unsubscribeNotices);
@@ -199,6 +214,10 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
   const location = () => ({ location: sessionLocation(ctx, sessionID()) });
 
   const [artifact, setArtifact] = createSignal<Artifact>(EMPTY_ARTIFACT);
+  /** The session's artifacts, in the order they were created. */
+  const [summaries, setSummaries] = createSignal<Summary[]>([]);
+  /** Artifacts the agent changed while another one was shown. */
+  const [unseen, setUnseen] = createSignal<ReadonlySet<string>>(new Set<string>());
   const [loaded, setLoaded] = createSignal(false);
   const [mode, setMode] = createSignal<Mode>("view");
   /** The text the edit started from: a save is refused if the document moved since. */
@@ -223,16 +242,29 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
   });
 
   let panelBox: Renderable | undefined;
+  /** The rendered document: the only part of the panel a comment can be about. */
+  let documentBox: Renderable | undefined;
   let editor: TextareaRenderable | undefined;
+
+  /** The artifact to show: the one chosen, else the last one changed. */
+  const shownId = (list: readonly Summary[]) => {
+    const wanted = chosen()[sessionID()];
+    if (wanted && list.some((summary) => summary.id === wanted)) return wanted;
+    return [...list].sort((a, b) => b.updatedAt - a.updatedAt)[0]?.id ?? "";
+  };
 
   let requested = 0;
   const load = async () => {
     const ticket = ++requested;
     try {
-      const next = (await client.get({ sessionID: sessionID() }, location())) as Artifact;
+      const { artifacts } = (await client.list({ sessionID: sessionID() }, location())) as { artifacts: Summary[] };
+      const id = shownId(artifacts);
+      const next = id ? ((await client.get({ sessionID: sessionID(), artifact: id }, location())) as Artifact) : EMPTY_ARTIFACT;
       if (ticket !== requested) return;
+      setSummaries(artifacts);
       setArtifact(next);
       setLoaded(true);
+      if (unseen().has(id)) setUnseen((previous) => new Set([...previous].filter((item) => item !== id)));
       // Deleted by the agent: nothing left to edit or comment.
       if (!exists(next)) {
         setMode("view");
@@ -246,12 +278,22 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
   createEffect(
     on(sessionID, () => {
       setArtifact(EMPTY_ARTIFACT);
+      setSummaries([]);
+      setUnseen(new Set<string>());
       setLoaded(false);
       setMode("view");
       setSelected("");
       void load();
       const unsubscribe = client.events.on("changed", (event) => {
-        if (event.data.sessionID === sessionID()) void load();
+        if (event.data.sessionID !== sessionID()) return;
+        const { artifact: id, by } = event.data as { artifact: string; by: string };
+        // The panel's own report of what it shows: nothing changed to reload.
+        if (by === "focus") return;
+        // A write to another artifact than the one shown: the header says so.
+        if (by === "agent" && id !== artifact().id && exists(artifact())) {
+          setUnseen((previous) => new Set([...previous, id]));
+        }
+        void load();
       });
       onCleanup(unsubscribe);
     }),
@@ -261,8 +303,8 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
   // editor's), so the selection is captured when the mouse lets go of it.
   const onSelection = (selection: Selection | null) => {
     if (!selection || mode() !== "view") return;
-    const inPanel = selection.selectedRenderables.some((renderable) => isWithin(renderable, panelBox));
-    setSelected(inPanel ? selection.getSelectedText().trim() : "");
+    const inDocument = selection.selectedRenderables.some((renderable) => isWithin(renderable, documentBox));
+    setSelected(inDocument ? selection.getSelectedText().trim() : "");
   };
 
   // A captured passage stays until it is commented or cancelled with esc,
@@ -306,7 +348,7 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
   const save = async (base = editBase()) => {
     if (!editor) return;
     const content = editor.plainText;
-    const result = (await client.save({ sessionID: sessionID(), content, base }, location())) as {
+    const result = (await client.save({ sessionID: sessionID(), artifact: artifact().id, content, base }, location())) as {
       saved: boolean;
       artifact: Artifact;
     };
@@ -349,7 +391,7 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
       placeholder: "Your comment",
     }));
     if (!note?.trim()) return;
-    const next = (await client.comment({ sessionID: sessionID(), quote, note }, location())) as Artifact;
+    const next = (await client.comment({ sessionID: sessionID(), artifact: artifact().id, quote, note }, location())) as Artifact;
     setArtifact(next);
     setSelected("");
     ctx.renderer.clearSelection();
@@ -362,13 +404,13 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
   const returnFocus = () => setTimeout(() => ctx.keymap.dispatch("pane.focus.left"), 50);
 
   const uncomment = async (commentID: string): Promise<void> => {
-    const next = (await client.uncomment({ sessionID: sessionID(), commentID }, location())) as Artifact;
+    const next = (await client.uncomment({ sessionID: sessionID(), artifact: artifact().id, commentID }, location())) as Artifact;
     setArtifact(next);
   };
 
   const send = async () => {
     if (artifact().comments.length === 0) return;
-    const { text } = (await client.submit({ sessionID: sessionID() }, location())) as { text: string };
+    const { text } = (await client.submit({ sessionID: sessionID(), artifact: artifact().id }, location())) as { text: string };
     if (!text) return;
     try {
       // Queued: a running turn finishes before the agent reads the review.
@@ -389,7 +431,7 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
       ctx.ui.toast.show({ message: "Save or discard your edits first.", variant: "info" });
       return;
     }
-    const next = (await client.switch({ sessionID: sessionID(), revision }, location())) as Artifact;
+    const next = (await client.switch({ sessionID: sessionID(), artifact: artifact().id, revision }, location())) as Artifact;
     setArtifact(next);
   };
   const undo = () => canUndo() && void switchTo(artifact().revision - 1);
@@ -431,6 +473,68 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
     if (revision !== undefined && revision !== artifact().revision) await switchTo(revision);
   };
 
+  /** Shows another artifact of the session. */
+  const show = (id: string) => {
+    if (id === artifact().id) return;
+    if (mode() === "edit") {
+      ctx.ui.toast.show({ message: "Save or discard your edits first.", variant: "info" });
+      return;
+    }
+    setSelected("");
+    choose(sessionID(), id);
+    void load();
+  };
+
+
+  const describeArtifact = (summary: Summary) => {
+    const position = summary.revision < summary.latest ? `rev ${summary.revision} · +${summary.latest - summary.revision} redo` : `rev ${summary.revision}`;
+    const comments = summary.comments > 0 ? ` · ${summary.comments} comment${summary.comments > 1 ? "s" : ""}` : "";
+    return `${truncate(summary.title, 36)} · ${position} · ${summary.lines} lines · ${when(summary.updatedAt)}${comments}`;
+  };
+
+  const artifacts = async () => {
+    const list = summaries();
+    if (list.length === 0) return;
+    const id = await ask(() =>
+      ctx.ui.dialog.select({
+        title: "Artifacts of this session",
+        current: artifact().id,
+        options: list.map((summary) => ({
+          title: `${summary.id}${unseen().has(summary.id) ? " ●" : ""}`,
+          value: summary.id,
+          description: describeArtifact(summary),
+        })),
+      }),
+    );
+    if (id !== undefined) show(id);
+  };
+
+  const rename = async () => {
+    const current = artifact();
+    if (!exists(current)) return;
+    const id = await ask(() =>
+      ctx.ui.dialog.prompt({
+        title: "Rename the artifact",
+        description: "Its identifier: lowercase letters, digits, - _ . (the agent uses it)",
+        value: current.id,
+      }),
+    );
+    if (id === undefined) return;
+    const title = await ask(() => ctx.ui.dialog.prompt({ title: "Rename the artifact", description: "Its title", value: current.title }));
+    if (title === undefined) return;
+    try {
+      const next = (await client.rename(
+        { sessionID: sessionID(), artifact: current.id, id: id.trim(), title: title.trim() },
+        location(),
+      )) as Artifact;
+      choose(sessionID(), next.id);
+      setArtifact(next);
+      void load();
+    } catch (error) {
+      ctx.ui.toast.show({ message: error instanceof Error ? error.message : String(error), variant: "error" });
+    }
+  };
+
   const idle = () => !selected();
   // A review goes out with at least one comment.
   const canSend = () => idle() && artifact().comments.length > 0;
@@ -446,6 +550,8 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
       { bind: "r", title: "Redo: next revision", group: "Artifact", enabled: () => idle() && canRedo(), run: redo },
       { bind: "h", title: "Revisions", group: "Artifact", enabled: has, run: () => void history() },
       { bind: "y", title: "Copy the document", group: "Artifact", enabled: has, run: () => void copy() },
+      { bind: "n", title: "Rename the artifact", group: "Artifact", enabled: has, run: () => void rename() },
+      { bind: "a", title: "Artifacts of the session", group: "Artifact", enabled: has, run: () => void artifacts() },
       { bind: "s", title: "Send review", group: "Artifact", enabled: canSend, run: () => void send() },
       { bind: "f", title: "Fullscreen", group: "Artifact", enabled: idle, run: () => props.input.toggleFullscreen() },
       { bind: "q", title: "Close", group: "Artifact", enabled: idle, run: () => props.input.close() },
@@ -475,6 +581,7 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
               ...(canRedo() ? ["r redo"] : []),
               "h revisions",
               "y copy",
+              "a artifacts",
               ...(artifact().comments.length > 0 ? ["s send"] : []),
               "f fullscreen",
               "q close",
@@ -537,6 +644,36 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
     </text>
   );
 
+  /** "rev 191", or "rev 189 · +2 redo" when revisions are kept for redo. */
+  const revisionLabel = () => {
+    const current = artifact();
+    const redo = current.latest - current.revision;
+    return redo > 0 ? `rev ${current.revision} · +${redo} redo` : `rev ${current.revision}`;
+  };
+
+  // The agent is told which artifact the user has open: what "this document"
+  // means in their messages. The server keeps it and moves the session's
+  // instruction entry; reported only when it changes.
+  let reported = "";
+  createEffect(
+    on([sessionID, () => artifact().id], ([session, id]) => {
+      if (!id || `${session}/${id}` === reported) return;
+      reported = `${session}/${id}`;
+      void client.focus({ sessionID: session, artifact: id }, location()).catch(() => (reported = ""));
+    }),
+  );
+
+  /** The theme's background as a text colour: a transparent theme leaves its base one empty. */
+  const opaqueBackground = () => {
+    const candidates: RGBA[] = [theme().background.base, theme().background.raised.base];
+    const opaque = candidates.find((color) => color.a > 0);
+    return opaque ? RGBA.fromValues(opaque.r, opaque.g, opaque.b, 1) : RGBA.fromValues(0, 0, 0, 1);
+  };
+
+  /** The other artifacts of the session, and whether the agent changed one of them out of view. */
+  const others = () => Math.max(0, summaries().length - 1);
+  const othersChanged = () => [...unseen()].some((id) => id !== artifact().id);
+
   /** The revisions kept for redo, after the current one. */
   const redoNotice = () => {
     const current = artifact();
@@ -567,7 +704,7 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
         when={exists(artifact())}
         fallback={
           <box flexDirection="row" flexGrow={1} gap={1}>
-            <text fg={theme().text.muted} flexGrow={1} minWidth={0}>
+            <text fg={theme().text.muted} flexGrow={1} minWidth={0} selectable={false}>
               {loaded()
                 ? "No artifact in this session yet. Ask the agent to write one (a plan, a spec…)."
                 : "Loading the artifact…"}
@@ -576,12 +713,60 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
           </box>
         }
       >
+        {/*
+          The artifact shown, by identifier, and the close button alone on the
+          right. With other artifacts in the session, a count says so (a dot when
+          the agent changed one out of view): a click lists them to open one.
+        */}
         <box flexDirection="row" flexShrink={0} gap={1}>
-          <text fg={theme().text.base} attributes={TextAttributes.BOLD} wrapMode="none" flexGrow={1} minWidth={0} truncate>
+          <box
+            flexDirection="row"
+            flexGrow={1}
+            minWidth={0}
+            onMouseUp={(event: { stopPropagation: () => void }) => {
+              if (others() === 0 || asking()) return;
+              event.stopPropagation();
+              void artifacts();
+            }}
+          >
+            {/* The theme's text and background colours swapped, like a comment card. */}
+            <text
+              fg={opaqueBackground()}
+              bg={theme().text.base}
+              attributes={TextAttributes.BOLD}
+              flexShrink={1}
+              minWidth={0}
+              wrapMode="none"
+              truncate
+              selectable={false}
+            >
+              {` ${artifact().id} `}
+            </text>
+            <Show when={others() > 0}>
+              {/* A button like the identifier, one column after it. */}
+              <text
+                fg={opaqueBackground()}
+                bg={theme().text.base}
+                attributes={TextAttributes.BOLD}
+                marginLeft={1}
+                flexShrink={0}
+                wrapMode="none"
+                selectable={false}
+              >
+                {/* The dot: the agent changed one of them while it was not shown. */}
+                {` +${others()} other${others() > 1 ? "s" : ""}${othersChanged() ? " ●" : ""} `}
+              </text>
+            </Show>
+          </box>
+          {closeButton()}
+        </box>
+        {/* The artifact shown: its title, then its revision and the actions on it. */}
+        <box flexDirection="row" flexShrink={0} gap={1} marginTop={1}>
+          <text fg={theme().text.base} attributes={TextAttributes.BOLD} wrapMode="none" flexGrow={1} minWidth={0} truncate selectable={false}>
             {artifact().title}
           </text>
-          <text fg={theme().text.muted} wrapMode="none" flexShrink={0}>
-            {`rev ${artifact().revision}/${artifact().latest}${commentCount()}${mode() === "edit" ? " · editing" : ""}`}
+          <text fg={theme().text.muted} wrapMode="none" flexShrink={0} selectable={false}>
+            {`${revisionLabel()}${commentCount()}${mode() === "edit" ? " · editing" : ""}`}
           </text>
           {/* The same separator as the footer's shortcuts. */}
           {separator()}
@@ -589,18 +774,18 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
           <box flexDirection="row" flexShrink={0} gap={2}>
             {button("◀", () => mode() === "view" && canUndo(), undo)}
             {button("▶", () => mode() === "view" && canRedo(), redo)}
-            {button("⧉", () => true, () => void copy())}
           </box>
+          {/* Undo and redo move between revisions; copy is apart. */}
           {separator()}
-          {closeButton()}
+          {button("⧉", () => true, () => void copy())}
         </box>
         <Show when={redoNotice()}>
-          <text fg={theme().text.feedback.warning.base} wrapMode="none" truncate flexShrink={0}>
+          <text fg={theme().text.feedback.warning.base} wrapMode="none" truncate flexShrink={0} selectable={false}>
             {redoNotice()}
           </text>
         </Show>
         <Show when={changedWhileEditing()}>
-          <text fg={theme().text.feedback.warning.base} flexShrink={0}>
+          <text fg={theme().text.feedback.warning.base} flexShrink={0} selectable={false}>
             The agent changed the document while you edit it.
           </text>
         </Show>
@@ -608,7 +793,7 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
           <Show
             when={mode() === "edit"}
             fallback={
-              <scrollbox flexGrow={1} scrollbarOptions={{ visible: false }}>
+              <scrollbox ref={(value: Renderable) => (documentBox = value)} flexGrow={1} scrollbarOptions={{ visible: false }}>
                 <For each={placed().blocks}>
                   {(block, index) => (
                     <box flexDirection="column" flexShrink={0} marginTop={index() === 0 ? 0 : 1}>
@@ -689,7 +874,7 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
           </Show>
         </box>
         <Show when={mode() === "view" && selected()}>
-          <text fg={theme().text.feedback.warning.base} wrapMode="none" truncate flexShrink={0}>
+          <text fg={theme().text.feedback.warning.base} wrapMode="none" truncate flexShrink={0} selectable={false}>
             {`Selected: “${truncate(selected(), Math.max(10, props.input.width - 14))}”`}
           </text>
         </Show>
@@ -697,11 +882,11 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
       <box flexShrink={0} paddingTop={1} paddingBottom={1}>
         {/* What `s` would send, always in view: no scrolling to count the comments. */}
         <Show when={reviewSummary()}>
-          <text fg={theme().text.feedback.warning.base} attributes={TextAttributes.BOLD} wrapMode="none" truncate>
+          <text fg={theme().text.feedback.warning.base} attributes={TextAttributes.BOLD} wrapMode="none" truncate selectable={false}>
             {reviewSummary()}
           </text>
         </Show>
-        <text fg={theme().text.muted} wrapMode="none" truncate>
+        <text fg={theme().text.muted} wrapMode="none" truncate selectable={false}>
           {hints()}
         </text>
       </box>

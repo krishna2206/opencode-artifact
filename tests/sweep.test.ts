@@ -7,7 +7,6 @@ function memoryStorage(keys: string[]): SweepStorage & { data: Map<string, unkno
     data,
     get: async (key) => data.get(key),
     set: async (key, value) => void data.set(key, value),
-    remove: async (key) => void data.delete(key),
     // Two entries per page, so the sweep has to follow `next`.
     scan: async ({ prefix, after }) => {
       const matching = [...data.keys()].filter((key) => key.startsWith(prefix)).sort();
@@ -19,40 +18,39 @@ function memoryStorage(keys: string[]): SweepStorage & { data: Map<string, unkno
   };
 }
 
+const PREFIXES = ["a/", "r/", "s/", "session/"];
 const live = new Set(["a", "c"]);
 const exists = async (sessionID: string) => live.has(sessionID);
 
 describe("sweepOrphans", () => {
-  it("removes the artifacts of missing sessions only, across pages", async () => {
-    const storage = memoryStorage(["session/a", "session/b", "session/c", "session/d", "session/e"]);
-    const removed = await sweepOrphans(storage, exists, 1_000_000);
-    expect(removed.sort()).toEqual(["b", "d", "e"]);
-    expect([...storage.data.keys()].filter((key) => key.startsWith("session/")).sort()).toEqual([
-      "session/a",
+  it("finds every session under the prefixes, across pages, and removes the missing ones once", async () => {
+    const storage = memoryStorage([
+      "a/a/lot-1",
+      "a/b/lot-1",
+      "a/b/lot-2",
+      "r/b/lot-1/3",
+      "s/d",
       "session/c",
+      "session/e",
     ]);
+    const removed: string[] = [];
+    await sweepOrphans(storage, PREFIXES, exists, async (sessionID) => void removed.push(sessionID), 1_000_000);
+    expect(removed.sort()).toEqual(["b", "d", "e"]);
   });
 
   it("runs at most once per interval", async () => {
-    const storage = memoryStorage(["session/b"]);
+    const storage = memoryStorage(["a/b/x"]);
+    const removed: string[] = [];
+    const remove = async (sessionID: string) => void removed.push(sessionID);
     await storage.set("meta/last-sweep", 1_000_000);
-    expect(await sweepOrphans(storage, exists, 1_000_000 + SWEEP_INTERVAL_MS - 1)).toEqual([]);
-    expect(storage.data.has("session/b")).toBe(true);
-    expect(await sweepOrphans(storage, exists, 1_000_000 + SWEEP_INTERVAL_MS)).toEqual(["b"]);
+    expect(await sweepOrphans(storage, PREFIXES, exists, remove, 1_000_000 + SWEEP_INTERVAL_MS - 1)).toEqual([]);
+    expect(await sweepOrphans(storage, PREFIXES, exists, remove, 1_000_000 + SWEEP_INTERVAL_MS)).toEqual(["b"]);
   });
 
-  it("removes each artifact through the given function", async () => {
-    const storage = memoryStorage(["session/a", "session/b"]);
-    const removedBy: string[] = [];
-    await sweepOrphans(storage, exists, 1_000_000, async (sessionID) => void removedBy.push(sessionID));
-    expect(removedBy).toEqual(["b"]);
-  });
-
-  it("keeps an artifact when the lookup fails for another reason", async () => {
-    const storage = memoryStorage(["session/x"]);
+  it("keeps a session's artifacts when the lookup fails for another reason", async () => {
+    const storage = memoryStorage(["a/x/doc"]);
     const unsure = async () => true; // what sessionExists returns on a non-NotFound error
-    expect(await sweepOrphans(storage, unsure, 1_000_000)).toEqual([]);
-    expect(storage.data.has("session/x")).toBe(true);
+    expect(await sweepOrphans(storage, PREFIXES, unsure, async () => {}, 1_000_000)).toEqual([]);
   });
 });
 
