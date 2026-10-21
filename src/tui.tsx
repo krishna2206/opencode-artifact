@@ -235,10 +235,16 @@ function ArtifactPanel(props: { ctx: Ctx; input: PanelInput; options: Options })
     }
   };
 
-  const syntax = createMemo(() => buildSyntax(ctx.theme));
+  const syntax = createMemo(() => buildSyntax(ctx.theme, ctx.renderer.nativeScene));
   createEffect(() => {
     const style = syntax();
-    onCleanup(() => style.destroy());
+    // A frame in progress may still use the style: free it once the renderer is idle.
+    onCleanup(() => {
+      void ctx.renderer
+        .idle()
+        .catch(() => {})
+        .finally(() => style.destroy());
+    });
   });
 
   let panelBox: Renderable | undefined;

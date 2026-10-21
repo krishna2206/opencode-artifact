@@ -1,14 +1,15 @@
 // The syntax style the chat uses for Markdown and code blocks. The host's own
 // style is not part of the plugin API, so this ports its rules from
-// @opencode/theme 2.0.15 (src/tui/syntax.ts, generateSyntax), minus the
+// @opencode/theme 2.1.2 (src/tui/syntax.ts, generateSyntax), minus the
 // prompt-only ones, to colour the artifact exactly like the conversation.
 
-import { RGBA, SyntaxStyle, type ThemeTokenStyle } from "@opentui/core";
+import { RGBA, SyntaxStyle, type NativeResourceOwner, type ThemeTokenStyle } from "@opentui/core";
 
 export const COMMENT_STYLE = "artifact.comment";
 
 // ctx.theme is the host's resolved theme; its type is not published with the plugin API.
-export function buildSyntax(theme: any): SyntaxStyle {
+// Since OpenTUI 0.6 a style is a native resource that needs an owner: the renderer's scene.
+export function buildSyntax(theme: any, owner: NativeResourceOwner): SyntaxStyle {
   const syntax = theme.syntax;
   const markdown = theme.markdown;
   const feedback = theme.text.feedback;
@@ -79,7 +80,7 @@ export function buildSyntax(theme: any): SyntaxStyle {
     rule(["error"], feedback.error.base, { bold: true }),
     rule(["warning"], feedback.warning.base, { bold: true }),
     rule(["info"], feedback.info.base),
-  ]);
+  ], owner);
 
   // Commented passages, highlighted in the editor.
   const warning: RGBA = feedback.warning.base;
