@@ -29,24 +29,25 @@
     "test": "bun test tests"
   },
   "dependencies": {
-    "effect": "4.0.1",
     "marked": "17.0.1"
   },
   "devDependencies": {
     "@babel/core": "^7.28.0",
     "@babel/preset-typescript": "^7.27.1",
-    "@opencode/plugin": "^2.1.2",
-    "@opentui/core": "0.6.6",
-    "@opentui/solid": "0.6.6",
+    "@opencode/plugin": "2.2.5",
+    "@opentui/core": "0.8.1",
+    "@opentui/solid": "0.8.1",
     "@types/node": "^26.1.2",
     "babel-preset-solid": "^1.9.12",
+    "effect": "4.0.6",
     "solid-js": "1.9.15",
     "typescript": "7.0.2"
   },
   "peerDependencies": {
-    "@opencode/plugin": "^2.1.2",
-    "@opentui/core": ">=0.6.6",
-    "@opentui/solid": ">=0.6.6",
+    "@opencode/plugin": "^2.2.0",
+    "@opentui/core": ">=0.8.1",
+    "@opentui/solid": ">=0.8.1",
+    "effect": "^4.0.0",
     "solid-js": "^1.9.0"
   },
   "engines": {
